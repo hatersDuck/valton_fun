@@ -1,0 +1,1 @@
+const BITS: Int = 1023;

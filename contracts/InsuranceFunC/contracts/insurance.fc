@@ -1,0 +1,230 @@
+;; INSURANCEv1
+#include "imports/stdlib.fc";
+
+const int BITS = 1023;
+
+global int count_nft;
+global int count_cells;
+int equal_slices (slice a, slice b) asm "SDEQ";
+
+int calc_cnt_cells() inline {
+    return 1 + (count_nft + count_nft * BITS) / (BITS * BITS);
+}
+
+int calc_count_bits(int depth) inline {
+    return count_nft + count_cells - BITS * depth;
+}
+
+int sum_depth(int n) impure {
+    int rt = 1;
+
+    while (n > 1) {
+        rt += n;
+        n /= 4;
+    }
+
+    return rt;
+}
+
+int next_depth(int depth, int m) inline {
+    return depth + m + (depth - sum_depth(m / 4)) * 3;
+}
+
+(cell) load_data() impure {
+    slice ds = get_data().begin_parse();
+    count_nft = ds~load_uint(32);
+    
+    cell votes = begin_cell().end_cell();
+
+    ifnot (slice_empty?(ds)) {
+        votes = ds~load_ref();
+    }
+
+    ds.end_parse();
+
+    count_cells = calc_cnt_cells();
+
+    return votes;
+}
+
+
+
+() save_data(cell votes) impure inline {
+    set_data(
+        begin_cell()
+            .store_uint(count_nft, 32)
+            .store_ref(votes)
+        .end_cell()
+    );
+}
+
+builder copy_info(slice old){
+    int count_bits = slice_bits(old);
+
+    builder rtn = begin_cell();
+
+    while (count_bits >= 256){
+        
+        rtn = store_uint(rtn, old~load_uint(256), 256);
+        count_bits -= 256;
+    }
+
+    int remant = count_bits % 256;
+    int value = old~load_uint(remant);
+
+    return rtn.store_uint(value, remant);
+}
+
+builder empty_bits(int count_bits) impure {
+    count_bits = min(count_bits, BITS);
+
+    builder rtn = begin_cell();
+    int cnt_full = count_bits / 256;
+    
+    while (count_bits >= 256){
+        rtn = store_uint(rtn, 0, 256);
+        count_bits -= 256;
+    }
+
+    int remant = count_bits % 256;
+
+    return rtn.store_uint(0, remant);
+}
+
+builder fill4(int depth, int m) impure {
+    builder bld = empty_bits(calc_count_bits(depth));
+
+    m *= 4;
+    int depth = next_depth(depth, m);
+    int nxt = depth;
+    int i = 0;
+
+    while ((i < 4) & (depth < count_cells)) {
+        if (nxt < count_cells) {
+            bld = store_ref(bld, fill4(depth, m).end_cell());
+        } else {
+            bld = store_ref(bld, empty_bits(calc_count_bits(depth)).end_cell());
+        }
+
+        i += 1;
+        depth += 1;
+        nxt += 4;
+    }
+    return bld;
+}
+
+builder fillValues4(slice old, slice vote, int depth, int m) {
+    int edit = old~load_uint(1);
+    builder bld = begin_cell();
+    int position = vote~load_uint(32);
+    int id = vote~load_uint(10);
+    if (position == depth) {
+        int steps = id / 256;
+
+        bld = store_uint(bld, 1, 1);
+
+        while (steps > 0){
+            bld = store_uint(bld, old~load_uint(256), 256);
+            steps -= 1;
+        }
+
+        int bits = min(256, slice_bits(old));
+        int value = old~load_uint(bits);
+        int bit_mask = 1 << (id % 256);
+        int result = (value & bit_mask) != 0;
+        ;; TODO
+        if (result) {
+            ;; count++
+            value += bit_mask;
+        } else {
+            ;; count --
+            value -= bit_mask;
+        }
+        bld = store_uint(bld, value, bits);
+        steps = id / 256;
+        if (steps != 3) {
+            bits = slice_bits(old);
+            while (bits >= 256){
+                bld = store_uint(bld, old~load_uint(256), 256);
+                bits -= 256;
+            }
+
+            int remant = bits % 256;
+            value = old~load_uint(remant);
+
+            bld = bld.store_uint(value, remant);
+        }
+    } else {
+        if (edit) {
+            bld = copy_info(old);
+        } else {
+            bld = empty_bits(calc_count_bits(depth));
+        }
+    }
+    vote = begin_cell().store_uint(position, 32).store_uint(id, 10).end_cell().begin_parse();
+
+    m *= 4;
+    int depth = next_depth(depth, m);
+    int nxt = depth;
+    int i = 0;
+
+    while ((i < 4) & (depth < count_cells)) {
+        if (nxt < count_cells) {
+            bld = store_ref(bld, fillValues4(old, vote, depth, m).end_cell());
+        } else {
+            if (edit) {
+                bld = copy_info(old);
+            } else {
+                bld = empty_bits(calc_count_bits(depth));
+            }
+        }
+
+        i += 1;
+        depth += 1;
+        nxt += 4;
+    }
+    return bld;
+}
+
+cell get_votes() method_id {
+    return load_data();
+}
+
+cell get_datas() method_id {
+    return get_data();
+}
+
+cell get_test() method_id {
+    ;; load_data();
+    load_data();
+
+    return fill4(0, 4).end_cell();
+    ;; return (next_depth(0, 4), next_depth(0, 16));  
+}
+
+;; delete
+int get_copy(cell old) method_id {
+    slice sls = begin_cell().store_uint(0, 256).end_cell().begin_parse();
+    slice odd = old.begin_parse();
+    builder new_bld = begin_cell().store_uint(sls~load_uint(256) + odd~load_uint(1), 256);
+    int depth = 2;
+    return calc_count_bits(depth);
+}
+
+(int, int) get_info_insurance() method_id {
+    load_data();
+
+    return (count_nft, count_cells);
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    ;; count_nft = in_msg_body~load_uint(32);
+    
+    ;; builder bld = empty_bits(1000);
+    ;; cell votes = bld.end_cell();
+    
+    ;; cell votes = fill4(0, 4).end_cell();
+    load_data();
+
+    save_data(fill4(0, 4).end_cell());
+}
